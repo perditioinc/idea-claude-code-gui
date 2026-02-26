@@ -29,28 +29,84 @@ export function mapModelIdToSdkName(modelId) {
 }
 
 /**
- * Set SDK environment variables based on the full model ID.
+ * Resolve the actual model name for API calls from user's settings.json.
+ * When the user configures a model mapping in their provider config (e.g. sonnet -> "MiniMax-M2.5"),
+ * those values are written to ~/.claude/settings.json as ANTHROPIC_DEFAULT_*_MODEL env vars.
+ * This function checks those settings and returns the mapped model name if configured.
+ *
+ * Priority: ANTHROPIC_MODEL (global override) > ANTHROPIC_DEFAULT_*_MODEL > original modelId
+ *
+ * @param {string} modelId - Internal model ID from frontend (e.g. 'claude-sonnet-4-6')
+ * @param {object} userEnv - The env object from settings.json (settings.env)
+ * @returns {string} The resolved model name for API calls
+ */
+export function resolveModelFromSettings(modelId, userEnv) {
+  if (!modelId || !userEnv) return modelId;
+
+  const lowerModel = modelId.toLowerCase();
+
+  // ANTHROPIC_MODEL is a global override that applies to all model types
+  if (userEnv.ANTHROPIC_MODEL && String(userEnv.ANTHROPIC_MODEL).trim()) {
+    return String(userEnv.ANTHROPIC_MODEL).trim();
+  }
+
+  // Check model-specific env vars based on the internal model ID's type
+  if (lowerModel.includes('opus')) {
+    const mapped = userEnv.ANTHROPIC_DEFAULT_OPUS_MODEL;
+    if (mapped && String(mapped).trim()) {
+      return String(mapped).trim();
+    }
+  } else if (lowerModel.includes('haiku')) {
+    const mapped = userEnv.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+    if (mapped && String(mapped).trim()) {
+      return String(mapped).trim();
+    }
+  } else {
+    // Covers 'sonnet' and any non-Anthropic model names (e.g. 'qwen3.5-plus', 'deepseek-v3')
+    // Since mapModelIdToSdkName() defaults to 'sonnet' for unknown models,
+    // we check ANTHROPIC_DEFAULT_SONNET_MODEL as the fallback mapping
+    const mapped = userEnv.ANTHROPIC_DEFAULT_SONNET_MODEL;
+    if (mapped && String(mapped).trim()) {
+      return String(mapped).trim();
+    }
+  }
+
+  // No mapping configured, use original model ID
+  return modelId;
+}
+
+/**
+ * Set SDK environment variables based on the model name.
  * The Claude SDK uses short names (opus/sonnet/haiku) as model selectors,
  * while the specific version is determined by ANTHROPIC_DEFAULT_*_MODEL environment variables.
  *
- * @param {string} modelId - Full model ID (e.g. 'claude-opus-4-6')
+ * @param {string} modelId - The resolved model name to set as env var value (e.g. 'MiniMax-M2.5' or 'claude-opus-4-6')
+ * @param {string} [baseModelId] - The original internal model ID used to determine which env var to set.
+ *                                  Required when modelId is a custom name that doesn't contain 'opus'/'haiku'/'sonnet'.
+ *                                  Falls back to modelId if not provided.
  */
-export function setModelEnvironmentVariables(modelId) {
+export function setModelEnvironmentVariables(modelId, baseModelId) {
   if (!modelId || typeof modelId !== 'string') {
     return;
   }
 
-  const lowerModel = modelId.toLowerCase();
+  // Use baseModelId to determine model category (which env var to set).
+  // This is necessary when modelId is a custom name like 'MiniMax-M2.5'
+  // that doesn't contain 'opus'/'haiku'/'sonnet'.
+  const lowerBase = (baseModelId || modelId).toLowerCase();
 
   // Set the corresponding environment variable based on model type
   // so the SDK knows which specific version to use
-  if (lowerModel.includes('opus')) {
+  if (lowerBase.includes('opus')) {
     process.env.ANTHROPIC_DEFAULT_OPUS_MODEL = modelId;
     console.log('[MODEL_ENV] Set ANTHROPIC_DEFAULT_OPUS_MODEL =', modelId);
-  } else if (lowerModel.includes('haiku')) {
+  } else if (lowerBase.includes('haiku')) {
     process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = modelId;
     console.log('[MODEL_ENV] Set ANTHROPIC_DEFAULT_HAIKU_MODEL =', modelId);
-  } else if (lowerModel.includes('sonnet')) {
+  } else {
+    // Covers 'sonnet' and any non-Anthropic model names (e.g. 'qwen3.5-plus', 'deepseek-v3')
+    // Since mapModelIdToSdkName() defaults to 'sonnet' for unknown models,
+    // the SDK will look up ANTHROPIC_DEFAULT_SONNET_MODEL for the actual model name
     process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = modelId;
     console.log('[MODEL_ENV] Set ANTHROPIC_DEFAULT_SONNET_MODEL =', modelId);
   }
