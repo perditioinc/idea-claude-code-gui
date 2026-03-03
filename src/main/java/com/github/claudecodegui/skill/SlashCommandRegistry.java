@@ -12,6 +12,7 @@ import org.snakeyaml.engine.v2.api.Load;
 import org.snakeyaml.engine.v2.api.LoadSettings;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -24,6 +25,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Merges built-in slash commands with skill-derived commands per provider.
@@ -60,6 +62,13 @@ public final class SlashCommandRegistry {
     private record InstalledPlugin(String pluginId, String installPath, String version) {
     }
 
+    // Security constants
+    private static final int MAX_UPWARD_TRAVERSAL_DEPTH = 20;
+    private static final long MAX_JSON_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+    private static final Pattern SAFE_PLUGIN_ID = Pattern.compile("^[a-zA-Z0-9._@/\\-]+$");
+    private static final int MAX_GLOB_PATTERN_LENGTH = 256;
+    private static final Pattern DANGEROUS_GLOB = Pattern.compile("(\\*\\*/){5,}");
+
     // Claude built-in commands (GUI-relevant only; CLI-only and frontend-local ones are excluded)
     public static final List<SlashCommand> CLAUDE_BUILTIN = List.of(
             new SlashCommand("/compact", "Toggle compact mode", "builtin"),
@@ -75,34 +84,6 @@ public final class SlashCommandRegistry {
             new SlashCommand("/plan", "Switch to plan mode", "builtin"),
             new SlashCommand("/review", "Review working tree changes", "builtin")
     );
-
-    /**
-     * Finds the repository root by walking up from cwd looking for a .git directory.
-     *
-     * @param cwd the current working directory
-     * @return the repo root path, or null if not in a git repository
-     */
-    public static String findRepoRoot(String cwd) {
-        if (cwd == null || cwd.isEmpty()) {
-            return null;
-        }
-        Path current;
-        try {
-            current = Paths.get(cwd).toAbsolutePath().normalize();
-        } catch (Exception e) {
-            LOG.debug("Invalid cwd for repo root detection: " + cwd);
-            return null;
-        }
-        Path root = current.getRoot();
-
-        while (current != null && !current.equals(root)) {
-            if (Files.isDirectory(current.resolve(".git"))) {
-                return current.toString();
-            }
-            current = current.getParent();
-        }
-        return null;
-    }
 
     /**
      * Gets the list of directories to scan for Claude skills or commands.
@@ -134,7 +115,7 @@ public final class SlashCommandRegistry {
             LOG.debug("Invalid cwd for skill scanning: " + cwd);
             return dirs;
         }
-        Path fsRoot = current.getRoot();
+
         Path homePath = null;
         if (userHome != null && !userHome.isEmpty()) {
             try {
@@ -144,18 +125,28 @@ public final class SlashCommandRegistry {
             }
         }
 
-        while (current != null && !current.equals(fsRoot)) {
+        // Security: if home directory cannot be determined, do not walk upward to filesystem root
+        if (homePath == null) {
+            LOG.warn("Cannot determine home directory, skipping upward skill scan");
+            return dirs;
+        }
+
+        Path fsRoot = current.getRoot();
+        int depth = 0;
+
+        while (current != null && !current.equals(fsRoot) && depth < MAX_UPWARD_TRAVERSAL_DEPTH) {
             Path candidate = current.resolve(".claude").resolve(type);
             String normalizedCandidate = normalizePath(candidate.toString());
             if (Files.isDirectory(candidate) && seen.add(normalizedCandidate)) {
                 dirs.add(new SkillScanDir(candidate.toString(), "project"));
             }
 
-            if (homePath != null && current.equals(homePath)) {
+            if (current.equals(homePath)) {
                 break;
             }
 
             current = current.getParent();
+            depth++;
         }
 
         return dirs;
@@ -235,7 +226,7 @@ public final class SlashCommandRegistry {
         String fromEnv = env != null ? env.get("CLAUDE_CODE_MANAGED_DIR") : null;
         if (fromEnv != null && !fromEnv.trim().isEmpty()) {
             String normalized = normalizePath(fromEnv.trim());
-            LOG.info("Managed directory from env: " + normalized);
+            LOG.debug("Managed directory from env: " + normalized);
             return normalized;
         }
 
@@ -250,7 +241,7 @@ public final class SlashCommandRegistry {
                 String dir = value.getAsString();
                 if (dir != null && !dir.trim().isEmpty()) {
                     String normalized = normalizePath(dir.trim());
-                    LOG.info("Managed directory from policy file: " + normalized);
+                    LOG.debug("Managed directory from policy file: " + normalized);
                     return normalized;
                 }
             }
@@ -279,7 +270,7 @@ public final class SlashCommandRegistry {
 
         Path skillsDir = resolveManagedSkillsDirectory(managedPath);
         if (skillsDir == null) {
-            LOG.info("Managed skills directory not found under: " + managedPath);
+            LOG.debug("Managed skills directory not found under: " + managedPath);
             return List.of();
         }
 
@@ -327,6 +318,13 @@ public final class SlashCommandRegistry {
             }
 
             String pluginId = entry.getKey();
+
+            // Security: validate plugin ID to prevent path traversal via crafted IDs
+            if (!SAFE_PLUGIN_ID.matcher(pluginId).matches() || pluginId.contains("..")) {
+                LOG.warn("Rejected unsafe plugin ID: " + pluginId);
+                continue;
+            }
+
             String pluginName = pluginId.split("@", 2)[0];
             InstalledPlugin installed = installedPlugins.get(pluginId);
             Path pluginDir = installed != null && installed.installPath() != null
@@ -338,7 +336,7 @@ public final class SlashCommandRegistry {
             Path manifestPath = resolvePluginManifestPath(pluginDir);
 
             if (manifestPath == null || !Files.isRegularFile(manifestPath)) {
-                LOG.info("Plugin manifest not found, skip: " + manifestPath);
+                LOG.debug("Plugin manifest not found, skip: " + manifestPath);
                 continue;
             }
 
@@ -377,19 +375,19 @@ public final class SlashCommandRegistry {
                     continue;
                 }
                 if (!Files.isDirectory(resolved)) {
-                    LOG.info("Plugin skill directory does not exist: " + resolved);
+                    LOG.debug("Plugin skill directory does not exist: " + resolved);
                     continue;
                 }
 
                 String key = pluginName + "::" + normalizePath(resolved.toString());
                 if (seen.add(key)) {
                     result.add(new PluginSkillPath(pluginName, resolved.toString()));
-                    LOG.info("Accepted plugin skill path: " + resolved + " (plugin=" + pluginId + ")");
+                    LOG.debug("Accepted plugin skill path: " + resolved + " (plugin=" + pluginId + ")");
                 }
             }
         }
 
-        LOG.info("Discovered plugin skill paths: " + result.size());
+        LOG.debug("Discovered plugin skill paths: " + result.size());
         return result;
     }
 
@@ -415,6 +413,18 @@ public final class SlashCommandRegistry {
             }
 
             String trimmed = pattern.trim();
+
+            // Security: validate pattern length and complexity to prevent pathological matching
+            if (trimmed.length() > MAX_GLOB_PATTERN_LENGTH) {
+                LOG.debug("Pattern too long, skip: " + trimmed.substring(0, 50) + "...");
+                continue;
+            }
+            String patternBody = trimmed.startsWith("glob:") ? trimmed.substring(5) : trimmed;
+            if (DANGEROUS_GLOB.matcher(patternBody).find()) {
+                LOG.debug("Pattern too complex, skip: " + trimmed);
+                continue;
+            }
+
             String candidatePattern = trimmed.startsWith("glob:") ? trimmed : "glob:" + trimmed;
 
             try {
@@ -852,7 +862,7 @@ public final class SlashCommandRegistry {
 
         try {
             LoadSettings settings = LoadSettings.builder()
-                    .setMaxAliasesForCollections(10)
+                    .setMaxAliasesForCollections(0)
                     .setCodePointLimit(8192)
                     .build();
             Load load = new Load(settings);
@@ -949,13 +959,18 @@ public final class SlashCommandRegistry {
         if (managedPath == null || !managedPath.isAbsolute()) {
             return false;
         }
-        if (!Files.isDirectory(managedPath)) {
+        try {
+            // Use toRealPath() to resolve ALL symlinks atomically, preventing TOCTOU races
+            Path realPath = managedPath.toRealPath();
+            if (!Files.isDirectory(realPath)) {
+                return false;
+            }
+            return realPath.getNameCount() > 1;
+        } catch (IOException e) {
+            // Path does not exist or cannot be resolved — reject
+            LOG.debug("Cannot resolve real path for managed directory safety check: " + managedPath);
             return false;
         }
-        if (managedPath.getNameCount() <= 1) {
-            return false;
-        }
-        return !Files.isSymbolicLink(managedPath);
     }
 
     private static Path getPolicySettingsPath() {
@@ -1033,7 +1048,8 @@ public final class SlashCommandRegistry {
         try {
             Path path = Paths.get(declaredPath);
             if (path.isAbsolute()) {
-                return path.normalize();
+                LOG.warn("Rejecting absolute plugin skill path: " + declaredPath);
+                return null;
             }
             return pluginDir.resolve(path).normalize();
         } catch (Exception e) {
@@ -1046,18 +1062,21 @@ public final class SlashCommandRegistry {
             return false;
         }
 
-        Path normalizedSkillPath = skillPath.toAbsolutePath().normalize();
-        Path normalizedPluginDir = pluginDir.toAbsolutePath().normalize();
+        try {
+            // Use toRealPath() to resolve ALL symlinks atomically, preventing TOCTOU and symlink bypass
+            Path realSkillPath = skillPath.toRealPath();
+            Path realPluginDir = pluginDir.toRealPath();
 
-        if (!normalizedSkillPath.startsWith(normalizedPluginDir)) {
+            if (!realSkillPath.startsWith(realPluginDir)) {
+                return false;
+            }
+
+            return !realSkillPath.equals(realPluginDir);
+        } catch (IOException e) {
+            // Path does not exist or cannot be resolved — reject
+            LOG.debug("Cannot resolve real path for plugin skill safety check: " + skillPath);
             return false;
         }
-
-        if (normalizedSkillPath.equals(normalizedPluginDir)) {
-            return false;
-        }
-
-        return !Files.isSymbolicLink(normalizedSkillPath);
     }
 
     private static Path resolvePluginManifestPath(Path pluginDir) {
@@ -1153,6 +1172,16 @@ public final class SlashCommandRegistry {
 
     private static JsonObject readJsonObject(Path path) {
         if (path == null || !Files.isRegularFile(path)) {
+            return null;
+        }
+
+        try {
+            long size = Files.size(path);
+            if (size > MAX_JSON_FILE_SIZE) {
+                LOG.warn("JSON file too large, skipping: " + path + " (" + size + " bytes)");
+                return null;
+            }
+        } catch (IOException e) {
             return null;
         }
 

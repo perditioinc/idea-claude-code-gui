@@ -137,7 +137,7 @@ public final class SkillFrontmatterParser {
         Map<String, Object> yamlMap;
         try {
             LoadSettings settings = LoadSettings.builder()
-                    .setMaxAliasesForCollections(10)
+                    .setMaxAliasesForCollections(0)
                     .setCodePointLimit(8192)
                     .build();
             Load load = new Load(settings);

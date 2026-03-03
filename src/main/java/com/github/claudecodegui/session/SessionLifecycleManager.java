@@ -14,11 +14,8 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.application.ReadAction;
 import com.intellij.openapi.diagnostic.Logger;
-import com.intellij.openapi.fileEditor.FileEditorManager;
 import com.intellij.openapi.project.Project;
-import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.ui.jcef.JBCefBrowser;
 
 import java.io.File;
@@ -338,27 +335,7 @@ public class SessionLifecycleManager {
         }
     }
 
-    /**
-     * Gets the currently selected editor file path.
-     *
-     * @return selected file path, or null if unavailable
-     */
     private String getCurrentEditorFilePath() {
-        try {
-            Project project = this.host.getProject();
-            if (project == null || project.isDisposed()) {
-                return null;
-            }
-            return ReadAction.compute(() -> {
-                VirtualFile[] selectedFiles = FileEditorManager.getInstance(project).getSelectedFiles();
-                if (selectedFiles.length == 0 || selectedFiles[0] == null) {
-                    return null;
-                }
-                return selectedFiles[0].getPath();
-            });
-        } catch (Exception e) {
-            LOG.debug("Failed to resolve current editor file path", e);
-            return null;
-        }
+        return com.github.claudecodegui.util.EditorFileUtils.getCurrentEditorFilePath(this.host.getProject());
     }
 }
