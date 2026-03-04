@@ -118,11 +118,10 @@ public class DependencyHandler extends BaseMessageHandler {
                     return;
                 }
 
-                String version = this.nodeDetector.verifyNodePath(configuredNodePath);
-                if (version != null) {
-                    this.nodeDetector.setNodeExecutable(configuredNodePath);
+                NodeDetectionResult result = this.nodeDetector.verifyAndCacheNodePath(configuredNodePath);
+                if (result != null && result.isFound()) {
                     LOG.info("[DependencyHandler] Using configured Node.js path: " +
-                             configuredNodePath + " (" + version + ")");
+                             configuredNodePath + " (" + result.getNodeVersion() + ")");
                 } else {
                     LOG.warn("[DependencyHandler] Configured Node.js path is invalid: " + configuredNodePath);
                 }

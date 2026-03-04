@@ -634,15 +634,31 @@ public class NodeDetector {
 
     /**
      * Manually sets the Node.js executable path.
-     * Also clears the cached detection result so it will be re-verified on next use.
+     * When setting a non-null path, verifies it and caches the detection result
+     * to ensure getCachedNodeVersion() returns a valid value.
+     * When setting null, clears both caches.
      */
     public void setNodeExecutable(String path) {
         synchronized (this.cacheLock) {
             this.clearInFlightLocked();
             this.cachedNodeExecutable = path;
-            // Clear detection result cache to keep cache state consistent.
-            // The new path will be re-verified and cached on next call to verifyAndCacheNodePath.
-            this.cachedDetectionResult = null;
+            if (path == null || path.isEmpty()) {
+                this.cachedDetectionResult = null;
+            } else if (this.cachedDetectionResult == null
+                       || !path.equals(this.cachedDetectionResult.getNodePath())) {
+                // Path changed or no cached result — verify and cache synchronously.
+                // This runs outside the lock via verifyNodePath (which only reads).
+                // We temporarily release nothing here because verifyNodePath is safe to call under lock
+                // (it spawns a child process but doesn't re-acquire cacheLock).
+                String version = verifyNodePath(path);
+                if (version != null) {
+                    this.cachedDetectionResult = NodeDetectionResult.success(
+                            path, version, NodeDetectionResult.DetectionMethod.KNOWN_PATH);
+                }
+                // If verification fails, preserve existing cachedDetectionResult
+                // rather than clearing it — this avoids the race condition where
+                // SessionHandler.getCachedNodeVersion() returns null.
+            }
         }
     }
 
