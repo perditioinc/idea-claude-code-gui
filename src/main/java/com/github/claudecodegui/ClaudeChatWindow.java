@@ -1,5 +1,6 @@
 package com.github.claudecodegui;
 
+import com.github.claudecodegui.action.SendShortcutSync;
 import com.github.claudecodegui.handler.HandlerContext;
 import com.github.claudecodegui.handler.HistoryHandler;
 import com.github.claudecodegui.handler.MessageDispatcher;
@@ -148,20 +149,37 @@ public class ClaudeChatWindow {
         setupSessionCallbacks();
         initializeSessionInfo();
         webviewInitializer.overrideBridgePathIfAvailable();
-        webviewInitializer.createUIComponents();
-        registerSessionLoadListener();
+
+        // Delay JCEF browser creation to avoid service initialization conflicts
+        // during JBCefApp$Holder class init (ProxyMigrationService dependency).
+        // Operations that depend on browser readiness are also deferred.
+        ApplicationManager.getApplication().invokeLater(() -> {
+            if (!disposed) {
+                webviewInitializer.createUIComponents();
+                registerSessionLoadListener();
+                this.initialized = true;
+                LOG.info("Window instance fully initialized, project: " + project.getName());
+            }
+        });
+
         if (!skipRegister) {
             registerInstance();
         }
         chatWindowDelegate.initializeStatusBar();
 
-        this.initialized = true;
-        LOG.info("Window instance fully initialized, project: " + project.getName());
+        // Sync IDEA keymap for ChatSendAction based on current sendShortcut setting
+        SendShortcutSync.syncFromSettings();
     }
 
     // ==================== Public API ====================
 
     public void setParentContent(Content content) {
+        // Unregister old mapping when changing or clearing parent content
+        if (this.parentContent != null && this.parentContent != content) {
+            ClaudeSDKToolWindow.unregisterContentMapping(this.parentContent);
+            LOG.debug("[MultiTab] Unregistered old Content -> ClaudeChatWindow mapping");
+        }
+
         this.parentContent = content;
         if (content != null) {
             ClaudeSDKToolWindow.registerContentMapping(content, this);
@@ -190,6 +208,7 @@ public class ClaudeChatWindow {
     public JPanel getContent() { return mainPanel; }
     public ClaudeSDKBridge getClaudeSDKBridge() { return claudeSDKBridge; }
     public CodexSDKBridge getCodexSDKBridge() { return codexSDKBridge; }
+    public String getSessionId() { return sessionId; }
 
     public void addCodeSnippetFromExternal(String selectionInfo) {
         addCodeSnippet(selectionInfo);
@@ -221,9 +240,18 @@ public class ClaudeChatWindow {
 
     // ==================== JavaScript Bridge ====================
 
+    private static final java.util.regex.Pattern SAFE_JS_FUNCTION_NAME =
+        java.util.regex.Pattern.compile("^[a-zA-Z_$][a-zA-Z0-9_$.]*$");
+
     void callJavaScript(String functionName, String... args) {
         if (disposed || browser == null) {
             LOG.warn("Cannot call JS function " + functionName + ": disposed=" + disposed + ", browser=" + (browser == null ? "null" : "exists"));
+            return;
+        }
+
+        // Validate function name to prevent JS injection
+        if (functionName == null || !SAFE_JS_FUNCTION_NAME.matcher(functionName).matches()) {
+            LOG.error("Invalid JavaScript function name rejected: " + functionName);
             return;
         }
 
@@ -233,7 +261,7 @@ public class ClaudeChatWindow {
             }
             try {
                 String callee = functionName;
-                if (functionName != null && !functionName.isEmpty() && !functionName.contains(".")) {
+                if (!functionName.contains(".")) {
                     callee = "window." + functionName;
                 }
 

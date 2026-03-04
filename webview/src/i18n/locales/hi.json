@@ -201,7 +201,7 @@
     "dependency": {
       "title": "SDK निर्भरता प्रबंधन",
       "description": "AI SDK निर्भरताएं प्रबंधित करें। पहली बार उपयोग करने से पहले आवश्यक SDK इंस्टॉल करें।",
-      "installPolicyTip": "पैकेज का आकार कम करने के लिए, SDK अब मैन्युअल रूप से इंस्टॉल करना होगा",
+      "installPolicyTip": "इंस्टॉलेशन में समस्या? त्रुटि को टर्मिनल CLI AI में कॉपी करके हल करें",
       "claudeSdkName": "Claude Code SDK",
       "claudeSdkDescription": "Claude AI सुविधाओं के लिए आवश्यक। Claude Code SDK और संबंधित निर्भरताएं शामिल हैं।",
       "codexSdkName": "Codex SDK",
@@ -219,7 +219,9 @@
       "installSuccess": "{{name}} सफलतापूर्वक इंस्टॉल हो गया",
       "installFailed": "इंस्टॉलेशन विफल: {{error}}",
       "uninstallSuccess": "{{name}} अनइंस्टॉल हो गया",
-      "uninstallFailed": "अनइंस्टॉल विफल: {{error}}"
+      "uninstallFailed": "अनइंस्टॉल विफल: {{error}}",
+      "updating": "अपडेट हो रहा है...",
+      "updateSuccess": "{{name}} सफलतापूर्वक अपडेट हो गया"
     },
     "usage": "उपयोग सांख्यिकी",
     "usageDesc": "अपनी Token खपत, लागत सांख्यिकी और उपयोग प्रवृत्ति विश्लेषण देखें",

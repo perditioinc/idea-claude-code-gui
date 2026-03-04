@@ -201,7 +201,7 @@
     "dependency": {
       "title": "Управление зависимостями SDK",
       "description": "Управление зависимостями AI SDK. Установите необходимый SDK перед первым использованием.",
-      "installPolicyTip": "SDK нужно устанавливать вручную для экономии места",
+      "installPolicyTip": "Проблемы с установкой? Скопируйте ошибку в терминальный CLI AI для решения",
       "claudeSdkName": "Claude Code SDK",
       "claudeSdkDescription": "Необходим для функций Claude AI. Включает Claude Code SDK и связанные зависимости.",
       "codexSdkName": "Codex SDK",
@@ -219,7 +219,9 @@
       "installSuccess": "{{name}} успешно установлен",
       "installFailed": "Ошибка установки: {{error}}",
       "uninstallSuccess": "{{name}} удалён",
-      "uninstallFailed": "Ошибка удаления: {{error}}"
+      "uninstallFailed": "Ошибка удаления: {{error}}",
+      "updating": "Обновление...",
+      "updateSuccess": "{{name}} успешно обновлён"
     },
     "usage": "Статистика использования",
     "usageDesc": "Просмотр потребления токенов, статистики затрат и анализа тенденций",

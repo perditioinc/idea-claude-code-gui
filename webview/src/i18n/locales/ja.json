@@ -201,7 +201,7 @@
     "dependency": {
       "title": "SDK依存関係管理",
       "description": "AI SDK依存関係を管理します。初回使用前に必要なSDKをインストールしてください。",
-      "installPolicyTip": "パッケージサイズを削減するため、SDKは手動でインストールする必要があります",
+      "installPolicyTip": "インストールに問題がある場合、エラーをターミナルCLI AIにコピーして解決できます",
       "claudeSdkName": "Claude Code SDK",
       "claudeSdkDescription": "Claude AI機能に必要です。Claude Code SDKと関連依存関係が含まれます。",
       "codexSdkName": "Codex SDK",
@@ -219,7 +219,9 @@
       "installSuccess": "{{name}}のインストールが完了しました",
       "installFailed": "インストール失敗: {{error}}",
       "uninstallSuccess": "{{name}}がアンインストールされました",
-      "uninstallFailed": "アンインストール失敗: {{error}}"
+      "uninstallFailed": "アンインストール失敗: {{error}}",
+      "updating": "更新中...",
+      "updateSuccess": "{{name}}が正常に更新されました"
     },
     "usage": "使用統計",
     "usageDesc": "トークン消費量、コスト統計、使用傾向分析を表示",

@@ -221,7 +221,7 @@
     "dependency": {
       "title": "SDK Dependency Management",
       "description": "Manage AI SDK dependencies. Install the required SDK before first use.",
-      "installPolicyTip": "To reduce package size, SDKs now need to be installed manually",
+      "installPolicyTip": "Installation issues? Copy the error to a terminal CLI AI to resolve",
       "claudeSdkName": "Claude Code SDK",
       "claudeSdkDescription": "Required for Claude AI features. Includes Claude Code SDK and related dependencies.",
       "codexSdkName": "Codex SDK",
@@ -239,7 +239,9 @@
       "installSuccess": "{{name}} installed successfully",
       "installFailed": "Installation failed: {{error}}",
       "uninstallSuccess": "{{name}} has been uninstalled",
-      "uninstallFailed": "Uninstall failed: {{error}}"
+      "uninstallFailed": "Uninstall failed: {{error}}",
+      "updating": "Updating...",
+      "updateSuccess": "{{name}} updated successfully"
     },
     "usage": "Usage Statistics",
     "usageDesc": "View your Token consumption, cost statistics and usage trend analysis",
