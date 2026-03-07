@@ -51,8 +51,13 @@ export default function PromptSection({
     cleanupPromptsTimeout,
   } = usePromptManagement({ onSuccess });
 
-  // Load prompts on mount
+  // Load project info and prompts on mount
   useEffect(() => {
+    // Load project info first
+    if (window.sendToJava) {
+      window.sendToJava('get_project_info:{}');
+    }
+    // Then load prompts
     loadAllPrompts();
     return () => cleanupPromptsTimeout();
   }, [loadAllPrompts, cleanupPromptsTimeout]);

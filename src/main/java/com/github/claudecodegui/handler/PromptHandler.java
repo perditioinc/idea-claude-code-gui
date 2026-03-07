@@ -36,6 +36,7 @@ public class PromptHandler extends BaseMessageHandler {
 
     private static final String[] SUPPORTED_TYPES = {
         "get_prompts",
+        "get_project_info",
         "add_prompt",
         "update_prompt",
         "delete_prompt",
@@ -63,6 +64,9 @@ public class PromptHandler extends BaseMessageHandler {
         switch (type) {
             case "get_prompts":
                 handleGetPrompts(content);
+                return true;
+            case "get_project_info":
+                handleGetProjectInfo(content);
                 return true;
             case "add_prompt":
                 handleAddPrompt(content);
@@ -125,13 +129,66 @@ public class PromptHandler extends BaseMessageHandler {
             List<JsonObject> prompts = settingsService.getPrompts(scope, context.getProject());
             String promptsJson = gson.toJson(prompts);
 
+            // Call different window callbacks based on scope
+            final String callbackName = scope == PromptScope.GLOBAL
+                ? "window.updateGlobalPrompts"
+                : "window.updateProjectPrompts";
+
             ApplicationManager.getApplication().invokeLater(() -> {
-                callJavaScript("window.updatePrompts", escapeJs(promptsJson));
+                callJavaScript(callbackName, escapeJs(promptsJson));
             });
         } catch (Exception e) {
             LOG.error("[PromptHandler] Failed to get prompts: " + e.getMessage(), e);
+
+            // Parse scope again for error callback
+            PromptScope scope = parseScopeFromData(content);
+            final String callbackName = scope == PromptScope.GLOBAL
+                ? "window.updateGlobalPrompts"
+                : "window.updateProjectPrompts";
+
             ApplicationManager.getApplication().invokeLater(() -> {
-                callJavaScript("window.updatePrompts", escapeJs("[]"));
+                callJavaScript(callbackName, escapeJs("[]"));
+            });
+        }
+    }
+
+    /**
+     * Get project information.
+     * Returns the current project name and availability status.
+     *
+     * @param content Message content (not used)
+     */
+    private void handleGetProjectInfo(String content) {
+        try {
+            JsonObject projectInfo = new JsonObject();
+            Project project = context.getProject();
+
+            if (project != null && !project.isDisposed() && project.getBasePath() != null) {
+                projectInfo.addProperty("available", true);
+                projectInfo.addProperty("name", project.getName());
+                projectInfo.addProperty("path", project.getBasePath());
+            } else {
+                projectInfo.addProperty("available", false);
+                projectInfo.addProperty("name", null);
+                projectInfo.addProperty("path", null);
+            }
+
+            String projectInfoJson = gson.toJson(projectInfo);
+
+            ApplicationManager.getApplication().invokeLater(() -> {
+                callJavaScript("window.updateProjectInfo", escapeJs(projectInfoJson));
+            });
+        } catch (Exception e) {
+            LOG.error("[PromptHandler] Failed to get project info: " + e.getMessage(), e);
+
+            // Send null project info on error
+            JsonObject projectInfo = new JsonObject();
+            projectInfo.addProperty("available", false);
+            projectInfo.addProperty("name", null);
+            projectInfo.addProperty("path", null);
+
+            ApplicationManager.getApplication().invokeLater(() -> {
+                callJavaScript("window.updateProjectInfo", escapeJs(gson.toJson(projectInfo)));
             });
         }
     }
