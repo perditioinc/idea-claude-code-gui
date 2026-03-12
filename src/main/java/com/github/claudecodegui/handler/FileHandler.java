@@ -1,37 +1,22 @@
 package com.github.claudecodegui.handler;
 
 import com.github.claudecodegui.model.FileSortItem;
-import com.github.claudecodegui.service.RunConfigMonitorService;
-import com.github.claudecodegui.terminal.TerminalMonitorService;
-import com.github.claudecodegui.util.EditorFileUtils;
-import com.github.claudecodegui.util.IgnoreRuleMatcher;
-import com.github.claudecodegui.util.PathUtils;
 import com.github.claudecodegui.util.PlatformUtils;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
-import com.intellij.ide.BrowserUtil;
 import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.application.ModalityState;
 import com.intellij.openapi.diagnostic.Logger;
-import com.intellij.openapi.editor.Editor;
-import com.intellij.openapi.editor.ScrollType;
-import com.intellij.openapi.fileEditor.FileEditorManager;
-import com.intellij.openapi.fileEditor.OpenFileDescriptor;
-import com.intellij.openapi.fileEditor.impl.EditorHistoryManager;
-import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.VirtualFile;
 
 import java.io.File;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 /**
  * File related message handler.
+ * Coordinates file listing, opening, and browser operations via dedicated sub-handlers.
  */
 public class FileHandler extends BaseMessageHandler {
 
@@ -39,48 +24,19 @@ public class FileHandler extends BaseMessageHandler {
 
     private static final String[] SUPPORTED_TYPES = {"list_files", "open_file", "open_browser"};
 
-    // Constants
-    private static final int MAX_RECENT_FILES = 50;
-    private static final int MAX_SEARCH_RESULTS = 200;
-    private static final int MAX_SEARCH_DEPTH = 15;
-    private static final int MAX_DIRECTORY_CHILDREN = 100;
-
-    // Directories always skipped (version control, package management, build cache, IDE config, etc.)
-    private static final Set<String> ALWAYS_SKIP_DIRS = Set.of(
-            // Version control
-            ".git", ".svn", ".hg", ".bzr",
-            // Package management and dependency cache
-            "node_modules", "__pycache__", ".pnpm", "bower_components",
-            // Java/JVM build cache
-            ".m2", ".gradle", ".ivy2", ".sbt", ".coursier",
-            // Other language package management cache
-            ".npm", ".yarn", ".pnpm-store", ".cargo", ".rustup",
-            ".pub-cache", ".gem", ".bundle", ".composer", ".nuget",
-            ".cache", ".local",
-            // Build output directories
-            "target", "build", "dist", "out", "output", "bin", "obj",
-            // IDE and editor configuration
-            ".idea", ".vscode", ".vs", ".eclipse", ".settings",
-            // Virtual environments
-            "venv", ".venv", "env", ".env", "virtualenv",
-            // Testing and coverage
-            "coverage", ".nyc_output", ".pytest_cache", "__snapshots__",
-            // Temporary and log files
-            "tmp", "temp", "logs", ".tmp", ".temp"
-    );
-
-    // Files always skipped
-    private static final Set<String> ALWAYS_SKIP_FILES = Set.of(
-            ".DS_Store", "Thumbs.db", "desktop.ini"
-    );
-
-    // Ignore rule matcher cache
-    private IgnoreRuleMatcher cachedIgnoreMatcher = null;
-    private String cachedIgnoreMatcherBasePath = null;
-    private long cachedGitignoreLastModified = 0;
+    private final OpenFileHandler openFileHandler;
+    private final OpenFileCollector openFileCollector;
+    private final RecentFileCollector recentFileCollector;
+    private final FileSystemCollector fileSystemCollector;
+    private final RuntimeContextCollector runtimeContextCollector;
 
     public FileHandler(HandlerContext context) {
         super(context);
+        this.openFileHandler = new OpenFileHandler(context);
+        this.openFileCollector = new OpenFileCollector(context);
+        this.recentFileCollector = new RecentFileCollector(context);
+        this.fileSystemCollector = new FileSystemCollector();
+        this.runtimeContextCollector = new RuntimeContextCollector(context);
     }
 
     @Override
@@ -96,11 +52,11 @@ public class FileHandler extends BaseMessageHandler {
                 yield true;
             }
             case "open_file" -> {
-                handleOpenFile(content);
+                openFileHandler.handleOpenFile(content);
                 yield true;
             }
             case "open_browser" -> {
-                handleOpenBrowser(content);
+                openFileHandler.handleOpenBrowser(content);
                 yield true;
             }
             default -> false;
@@ -126,19 +82,19 @@ public class FileHandler extends BaseMessageHandler {
                 List<JsonObject> files = new ArrayList<>();
 
                 // Priority 0: Active Terminals
-                collectActiveTerminals(files, request);
+                runtimeContextCollector.collectTerminals(files, request);
 
                 // Priority 0: Active Services
-                collectActiveServices(files, request);
+                runtimeContextCollector.collectServices(files, request);
 
                 // Priority 1: Currently open files
-                collectOpenFiles(files, fileSet, basePath, request);
+                openFileCollector.collect(files, fileSet, basePath, request);
 
                 // Priority 2: Recently opened files
-                collectRecentFiles(files, fileSet, basePath, request);
+                recentFileCollector.collect(files, fileSet, basePath, request);
 
                 // Priority 3: File system scan
-                collectFileSystemFiles(files, fileSet, basePath, request);
+                fileSystemCollector.collect(files, fileSet, basePath, request);
 
                 // 5. Sort
                 sortFiles(files);
@@ -162,185 +118,6 @@ public class FileHandler extends BaseMessageHandler {
 
         ApplicationManager.getApplication().invokeLater(() -> {
             callJavaScript("window.onFileListResult", escapeJs(resultJson));
-        });
-    }
-
-    /**
-     * Collect currently open files.
-     */
-    private void collectOpenFiles(List<JsonObject> files, FileSet fileSet, String basePath, FileListRequest request) {
-        ApplicationManager.getApplication().runReadAction(() -> {
-            Project project = context.getProject();
-            if (project == null || project.isDisposed()) {
-                LOG.debug("[FileHandler] Project is null or disposed in collectOpenFiles");
-                return;
-            }
-
-            try {
-                // Double-check project state inside read action
-                if (project.isDisposed()) {
-                    LOG.debug("[FileHandler] Project disposed during collectOpenFiles");
-                    return;
-                }
-
-                VirtualFile[] openFiles = FileEditorManager.getInstance(project).getOpenFiles();
-                LOG.debug("[FileHandler] Collecting " + openFiles.length + " open files");
-
-                for (VirtualFile vf : openFiles) {
-                    addVirtualFile(vf, basePath, files, fileSet, request, 1);
-                }
-            } catch (Exception e) {
-                LOG.warn("[FileHandler] Error collecting open files: " + e.getMessage(), e);
-            }
-        });
-    }
-
-    /**
-     * Collect recently opened files.
-     */
-    private void collectRecentFiles(List<JsonObject> files, FileSet fileSet, String basePath, FileListRequest request) {
-        ApplicationManager.getApplication().runReadAction(() -> {
-            Project project = context.getProject();
-            if (project == null || project.isDisposed()) {
-                LOG.debug("[FileHandler] Project is null or disposed in collectRecentFiles");
-                return;
-            }
-
-            try {
-                // Double-check project state inside read action
-                if (project.isDisposed()) {
-                    LOG.debug("[FileHandler] Project disposed during collectRecentFiles");
-                    return;
-                }
-
-                List<VirtualFile> recentFiles = EditorHistoryManager.getInstance(project).getFileList();
-                if (recentFiles == null) {
-                    LOG.warn("[FileHandler] EditorHistoryManager returned null file list");
-                    return;
-                }
-
-                LOG.debug("[FileHandler] Collecting up to " + MAX_RECENT_FILES + " recent files from " + recentFiles.size() + " total");
-
-                // Iterate in reverse order to get the most recent files
-                int count = 0;
-                for (int i = recentFiles.size() - 1; i >= 0; i--) {
-                    if (count >= MAX_RECENT_FILES) {
-                        break;
-                    }
-                    VirtualFile vf = recentFiles.get(i);
-                    if (vf != null) {
-                        addVirtualFile(vf, basePath, files, fileSet, request, 2);
-                        count++;
-                    }
-                }
-            } catch (Throwable t) {
-                LOG.warn("[FileHandler] Failed to get recent files: " + t.getMessage(), t);
-            }
-        });
-    }
-
-    /**
-     * Collect files from the file system.
-     */
-    private void collectFileSystemFiles(List<JsonObject> files, FileSet fileSet, String basePath, FileListRequest request) {
-        List<JsonObject> diskFiles = new ArrayList<>();
-
-        // Get or create ignore rule matcher
-        IgnoreRuleMatcher ignoreMatcher = getOrCreateIgnoreMatcher(basePath);
-
-        if (request.hasQuery) {
-            File baseDir = new File(basePath);
-            collectFilesRecursive(baseDir, basePath, diskFiles, request, 0, ignoreMatcher);
-        } else {
-            File targetDir = new File(basePath, request.currentPath);
-            if (targetDir.exists() && targetDir.isDirectory()) {
-                listDirectChildren(targetDir, basePath, diskFiles, ignoreMatcher);
-            }
-        }
-
-        // Merge disk scan results
-        for (JsonObject fileObj : diskFiles) {
-            String absPath = fileObj.get("absolutePath").getAsString();
-            if (fileSet.tryAdd(absPath)) {
-                fileObj.addProperty("priority", 3);
-                files.add(fileObj);
-            }
-        }
-    }
-
-    /**
-     * Collect active services (Run/Debug configurations).
-     */
-    private void collectActiveServices(List<JsonObject> files, FileListRequest request) {
-        ApplicationManager.getApplication().runReadAction(() -> {
-            Project project = context.getProject();
-            if (project == null || project.isDisposed()) return;
-
-            try {
-                List<RunConfigMonitorService.RunConfigInfo> configs = RunConfigMonitorService.getRunConfigurations(project);
-                for (RunConfigMonitorService.RunConfigInfo config : configs) {
-                    String displayName = config.getDisplayName();
-                    String title = "Service: " + displayName;
-
-                    // Create safe name for the path (replace spaces with _, remove special chars)
-                    String safeName = displayName.replace(" ", "_").replaceAll("[^a-zA-Z0-9_]", "");
-                    String path = "service://" + safeName;
-
-                    if (request.matches(title, path)) {
-                        JsonObject serviceObj = new JsonObject();
-                        serviceObj.addProperty("name", title);
-                        serviceObj.addProperty("path", path);
-                        serviceObj.addProperty("absolutePath", path); // Tag used in UI
-                        serviceObj.addProperty("type", "service");
-                        serviceObj.addProperty("priority", 0); // High priority
-                        files.add(serviceObj);
-                    }
-                }
-            } catch (Throwable t) {
-                LOG.warn("[FileHandler] Failed to collect services: " + t.getMessage());
-            }
-        });
-    }
-
-    /**
-     * Collect active terminals.
-     */
-    private void collectActiveTerminals(List<JsonObject> files, FileListRequest request) {
-        ApplicationManager.getApplication().runReadAction(() -> {
-            Project project = context.getProject();
-            if (project == null || project.isDisposed()) return;
-
-            try {
-                List<Object> widgets = TerminalMonitorService.getWidgets(project);
-                Map<String, Integer> nameCounts = new HashMap<>();
-
-                for (Object widget : widgets) {
-                    String baseTitle = TerminalMonitorService.getWidgetTitle(widget);
-                    int count = nameCounts.getOrDefault(baseTitle, 0) + 1;
-                    nameCounts.put(baseTitle, count);
-
-                    String titleText = baseTitle;
-                    if (count > 1) {
-                        titleText = baseTitle + " (" + count + ")";
-                    }
-
-                    String title = "Terminal: " + titleText;
-                    String safeName = titleText.replace(" ", "_").replaceAll("[^a-zA-Z0-9_]", "");
-                    String path = "terminal://" + safeName;
-
-                    if (request.matches(title, path)) {
-                        JsonObject term = new JsonObject();
-                        term.addProperty("name", title);
-                        term.addProperty("path", path);
-                        term.addProperty("absolutePath", path);
-                        term.addProperty("type", "terminal");
-                        term.addProperty("priority", 0); // High priority
-                        files.add(term);
-                    }
-                }
-            } catch (Throwable t) {
-                LOG.warn("[FileHandler] Failed to collect terminals: " + t.getMessage());
-            }
         });
     }
 
@@ -440,282 +217,12 @@ public class FileHandler extends BaseMessageHandler {
         }
     }
 
-    /**
-     * Open a file in the editor.
-     * Supports file paths with line numbers: file.txt:100 or file.txt:100-200.
-     */
-    private void handleOpenFile(String filePath) {
-        LOG.info("Open file request: " + filePath);
-
-        // First process file path parsing on a regular thread (no VFS operations involved)
-        CompletableFuture.runAsync(() -> {
-            try {
-                // Parse file path and line number
-                final String[] parsedPath = {filePath};
-                final int[] parsedLineNumber = {-1};
-                final int[] parsedEndLineNumber = {-1};
-
-                // Detect and extract line number (format: file.txt:100 or file.txt:100-200)
-                int colonIndex = filePath.lastIndexOf(':');
-                if (colonIndex > 0) {
-                    String afterColon = filePath.substring(colonIndex + 1);
-                    // Check if after the colon is a line number (may include a range, e.g. 100-200)
-                    if (afterColon.matches("\\d+(-\\d+)?")) {
-                        parsedPath[0] = filePath.substring(0, colonIndex);
-                        int dashIndex = afterColon.indexOf('-');
-                        String startLineStr = dashIndex > 0 ? afterColon.substring(0, dashIndex) : afterColon;
-                        String endLineStr = dashIndex > 0 ? afterColon.substring(dashIndex + 1) : null;
-                        try {
-                            parsedLineNumber[0] = Integer.parseInt(startLineStr);
-                            if (endLineStr != null && !endLineStr.isBlank()) {
-                                parsedEndLineNumber[0] = Integer.parseInt(endLineStr);
-                                LOG.info("Detected line range: " + parsedLineNumber[0] + "-" + parsedEndLineNumber[0]);
-                            } else {
-                                LOG.info("Detected line number: " + parsedLineNumber[0]);
-                            }
-                        } catch (NumberFormatException e) {
-                            LOG.warn("Failed to parse line number: " + afterColon);
-                        }
-                    }
-                }
-
-                final String actualPath = parsedPath[0];
-                final int lineNumber = parsedLineNumber[0];
-                final int endLineNumber = parsedEndLineNumber[0];
-
-                File file = new File(actualPath);
-                if (!file.exists() && PlatformUtils.isWindows()) {
-                    String convertedPath = PathUtils.convertMsysToWindowsPath(actualPath);
-                    if (!convertedPath.equals(actualPath)) {
-                        LOG.info("Detected MSYS2 path, converted to Windows path: " + convertedPath);
-                        file = new File(convertedPath);
-                    }
-                }
-
-                // If file does not exist and is a relative path, try resolving relative to the project root
-                if (!file.exists() && !file.isAbsolute() && context.getProject().getBasePath() != null) {
-                    File projectFile = new File(context.getProject().getBasePath(), actualPath);
-                    LOG.info("Trying to resolve relative to project root: " + projectFile.getAbsolutePath());
-                    if (projectFile.exists()) {
-                        file = projectFile;
-                    }
-                }
-
-                if (!file.exists()) {
-                    LOG.warn("File not found: " + actualPath);
-                    ApplicationManager.getApplication().invokeLater(() -> {
-                        callJavaScript("addErrorMessage", escapeJs("Cannot open file: file does not exist (" + actualPath + ")"));
-                    }, ModalityState.nonModal());
-                    return;
-                }
-
-                final File finalFile = file;
-
-                // Use utility method to asynchronously refresh and find the file
-                EditorFileUtils.refreshAndFindFileAsync(finalFile, virtualFile -> {
-                    ApplicationManager.getApplication().invokeLater(() -> {
-                        if (context.getProject().isDisposed() || !virtualFile.isValid()) {
-                            return;
-                        }
-
-                        Editor editor;
-                        if (lineNumber > 0) {
-                            OpenFileDescriptor descriptor = new OpenFileDescriptor(context.getProject(), virtualFile);
-                            editor = FileEditorManager.getInstance(context.getProject()).openTextEditor(descriptor, true);
-
-                            if (editor != null) {
-                                int lineCount = editor.getDocument().getLineCount();
-                                if (lineCount > 0) {
-                                    int zeroBasedLine = Math.min(Math.max(0, lineNumber - 1), lineCount - 1);
-                                    int startOffset = editor.getDocument().getLineStartOffset(zeroBasedLine);
-                                    editor.getCaretModel().moveToOffset(startOffset);
-
-                                    if (endLineNumber >= lineNumber) {
-                                        int zeroBasedEndLine = Math.min(endLineNumber - 1, lineCount - 1);
-                                        int endOffset = editor.getDocument().getLineEndOffset(zeroBasedEndLine);
-                                        editor.getSelectionModel().setSelection(startOffset, endOffset);
-                                        LOG.info("Navigated and selected line range: " + lineNumber + "-" + endLineNumber);
-                                    } else {
-                                        if (endLineNumber > 0) {
-                                            LOG.warn("Invalid line range: " + lineNumber + "-" + endLineNumber);
-                                        }
-                                        editor.getSelectionModel().removeSelection();
-                                        LOG.info("Navigated to line " + lineNumber);
-                                    }
-
-                                    editor.getScrollingModel().scrollToCaret(ScrollType.CENTER);
-                                } else {
-                                    LOG.warn("File is empty, cannot navigate to line " + lineNumber);
-                                }
-                            } else {
-                                LOG.warn("Cannot open text editor: " + virtualFile.getPath());
-                                FileEditorManager.getInstance(context.getProject()).openFile(virtualFile, true);
-                            }
-                        } else {
-                            FileEditorManager.getInstance(context.getProject()).openFile(virtualFile, true);
-                        }
-
-                        LOG.info("Successfully opened file: " + filePath);
-                    }, ModalityState.nonModal());
-                }, () -> {
-                    // Failure callback
-                    LOG.error("Failed to get VirtualFile: " + filePath);
-                    callJavaScript("addErrorMessage", escapeJs("Cannot open file: " + filePath));
-                });
-            } catch (Exception e) {
-                LOG.error("Failed to open file: " + e.getMessage(), e);
-            }
-        });
-    }
-
-    /**
-     * Open the browser.
-     */
-    private void handleOpenBrowser(String url) {
-        ApplicationManager.getApplication().invokeLater(() -> {
-            try {
-                BrowserUtil.browse(url);
-            } catch (Exception e) {
-                LOG.error("Cannot open browser: " + e.getMessage(), e);
-            }
-        });
-    }
-
-    /**
-     * List direct children of a directory (non-recursive).
-     */
-    private void listDirectChildren(File dir, String basePath, List<JsonObject> files, IgnoreRuleMatcher ignoreMatcher) {
-        if (!dir.isDirectory()) return;
-
-        File[] children = dir.listFiles();
-        if (children == null) return;
-
-        int added = 0;
-        for (File child : children) {
-            if (added >= MAX_DIRECTORY_CHILDREN) break;
-
-            String name = child.getName();
-            boolean isDir = child.isDirectory();
-            String relativePath = getRelativePath(child, basePath);
-
-            if (shouldSkipInSearch(name, isDir, relativePath, ignoreMatcher)) {
-                continue;
-            }
-
-            JsonObject fileObj = createFileObject(child, name, relativePath);
-            files.add(fileObj);
-            added++;
-        }
-    }
-
-    /**
-     * Recursively collect files.
-     */
-    private void collectFilesRecursive(File dir, String basePath, List<JsonObject> files, FileListRequest request, int depth, IgnoreRuleMatcher ignoreMatcher) {
-        if (depth > MAX_SEARCH_DEPTH || files.size() >= MAX_SEARCH_RESULTS) return;
-        if (!dir.isDirectory()) return;
-
-        File[] children = dir.listFiles();
-
-        if (children == null) return;
-
-        for (File child : children) {
-            if (files.size() >= MAX_SEARCH_RESULTS) break;
-
-            String name = child.getName();
-            boolean isDir = child.isDirectory();
-            String relativePath = getRelativePath(child, basePath);
-
-            if (shouldSkipInSearch(name, isDir, relativePath, ignoreMatcher)) {
-                continue;
-            }
-
-            // Check if it matches the query
-            boolean matches = true;
-            if (request.hasQuery) {
-                matches = request.matches(name, relativePath);
-            }
-
-            if (matches) {
-                JsonObject fileObj = createFileObject(child, name, relativePath);
-                files.add(fileObj);
-            }
-
-            // Directories are always searched recursively (child files may match even if the directory itself doesn't)
-            if (isDir) {
-                collectFilesRecursive(child, basePath, files, request, depth + 1, ignoreMatcher);
-            }
-        }
-    }
-
-    /**
-     * Determine whether to skip a file or directory (basic version, checks hardcoded lists only).
-     */
-    private boolean shouldSkipInSearch(String name, boolean isDirectory) {
-        if (isDirectory) {
-            return ALWAYS_SKIP_DIRS.contains(name);
-        }
-        return ALWAYS_SKIP_FILES.contains(name);
-    }
-
-    /**
-     * Determine whether to skip a file or directory (includes .gitignore rule checking).
-     */
-    private boolean shouldSkipInSearch(String name, boolean isDirectory, String relativePath, IgnoreRuleMatcher matcher) {
-        // First check the hardcoded exclusion list
-        if (shouldSkipInSearch(name, isDirectory)) {
-            return true;
-        }
-
-        // Then check .gitignore rules
-        if (matcher != null && relativePath != null) {
-            return matcher.isIgnored(relativePath, isDirectory);
-        }
-
-        return false;
-    }
-
-    /**
-     * Get or create ignore rule matcher.
-     */
-    private IgnoreRuleMatcher getOrCreateIgnoreMatcher(String basePath) {
-        if (basePath == null) {
-            return null;
-        }
-
-        File gitignoreFile = new File(basePath, ".gitignore");
-        long currentLastModified = gitignoreFile.exists() ? gitignoreFile.lastModified() : 0;
-
-        // Check if cache is valid
-        boolean cacheValid = cachedIgnoreMatcher != null
-                                     && basePath.equals(cachedIgnoreMatcherBasePath)
-                                     && currentLastModified == cachedGitignoreLastModified;
-
-        if (cacheValid) {
-            return cachedIgnoreMatcher;
-        }
-
-        // Re-create matcher
-        try {
-            IgnoreRuleMatcher matcher = IgnoreRuleMatcher.forProject(basePath);
-            LOG.debug("[FileHandler] Created IgnoreRuleMatcher with " + matcher.getRuleCount() + " rules for " + basePath);
-
-            // Update cache
-            cachedIgnoreMatcher = matcher;
-            cachedIgnoreMatcherBasePath = basePath;
-            cachedGitignoreLastModified = currentLastModified;
-
-            return matcher;
-        } catch (Exception e) {
-            LOG.warn("[FileHandler] Failed to create IgnoreRuleMatcher: " + e.getMessage());
-            return null;
-        }
-    }
+    // --- Static utility methods shared with collectors ---
 
     /**
      * Get relative path.
      */
-    private String getRelativePath(File file, String basePath) {
+    static String getRelativePath(File file, String basePath) {
         String relativePath = file.getAbsolutePath().substring(basePath.length());
         if (relativePath.startsWith(File.separator)) {
             relativePath = relativePath.substring(1);
@@ -726,7 +233,7 @@ public class FileHandler extends BaseMessageHandler {
     /**
      * Create a file object.
      */
-    private JsonObject createFileObject(File file, String name, String relativePath) {
+    static JsonObject createFileObject(File file, String name, String relativePath) {
         JsonObject fileObj = new JsonObject();
         fileObj.addProperty("name", name);
         fileObj.addProperty("path", relativePath);
@@ -745,7 +252,7 @@ public class FileHandler extends BaseMessageHandler {
     /**
      * Create a file object (from VirtualFile, avoiding physical I/O).
      */
-    private JsonObject createFileObject(VirtualFile file, String relativePath) {
+    static JsonObject createFileObject(VirtualFile file, String relativePath) {
         JsonObject fileObj = new JsonObject();
         String name = file.getName();
         fileObj.addProperty("name", name);
@@ -765,7 +272,7 @@ public class FileHandler extends BaseMessageHandler {
     /**
      * Add a VirtualFile to the list.
      */
-    private void addVirtualFile(VirtualFile vf, String basePath, List<JsonObject> files, FileSet fileSet, FileListRequest request, int priority) {
+    static void addVirtualFile(VirtualFile vf, String basePath, List<JsonObject> files, FileSet fileSet, FileListRequest request, int priority) {
         // Enhanced null safety checks
         if (vf == null || !vf.isValid() || vf.isDirectory()) return;
         if (basePath == null) {
@@ -774,7 +281,7 @@ public class FileHandler extends BaseMessageHandler {
         }
 
         String name = vf.getName();
-        if (shouldSkipInSearch(name, false)) return;
+        if (FileSystemCollector.shouldSkipInSearch(name, false)) return;
 
         String path = vf.getPath();
         if (path == null) {
@@ -805,7 +312,7 @@ public class FileHandler extends BaseMessageHandler {
     /**
      * File list request wrapper.
      */
-    private static class FileListRequest {
+    static class FileListRequest {
 
         final String query;
         final String queryLower;
@@ -830,7 +337,7 @@ public class FileHandler extends BaseMessageHandler {
     /**
      * File set that automatically handles path normalization and deduplication.
      */
-    private static class FileSet {
+    static class FileSet {
 
         private final HashSet<String> paths = new HashSet<>();
 
