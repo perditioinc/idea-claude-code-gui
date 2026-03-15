@@ -130,6 +130,7 @@ const App = () => {
     streamingThinkingSegmentsRef, activeThinkingSegmentIndexRef,
     seenToolUseCountRef, contentUpdateTimeoutRef, thinkingUpdateTimeoutRef,
     lastContentUpdateRef, lastThinkingUpdateRef, autoExpandedThinkingKeysRef,
+    streamingTurnIdRef, turnIdCounterRef,
     findLastAssistantIndex, extractRawBlocks,
     getOrCreateStreamingAssistantIndex, patchAssistantForStreaming,
   } = useStreamingMessages();
@@ -234,6 +235,7 @@ const App = () => {
     streamingTextSegmentsRef, activeTextSegmentIndexRef,
     streamingThinkingSegmentsRef, activeThinkingSegmentIndexRef,
     seenToolUseCountRef, streamingMessageIndexRef,
+    streamingTurnIdRef, turnIdCounterRef,
     lastContentUpdateRef, contentUpdateTimeoutRef,
     lastThinkingUpdateRef, thinkingUpdateTimeoutRef,
     findLastAssistantIndex, extractRawBlocks,
